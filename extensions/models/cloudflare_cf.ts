@@ -197,7 +197,7 @@ const RunArgsSchema = z.object({
     'Command options without dashes, e.g. {"type": "A", "per-page": 100}. true emits a bare flag, false is omitted, arrays repeat the flag.',
   ),
   body: z.unknown().optional().describe(
-    "JSON request body, sent as --body (bypasses individual body flags).",
+    "Request body, sent as --body. An object or array is JSON-encoded; a string is passed through raw — use a string for octet-stream uploads (KV values, R2 objects), or a pre-serialized JSON document.",
   ),
   zone: z.string().optional().describe(
     "Zone ID or domain for this call; overrides the model's zone.",
@@ -272,6 +272,16 @@ export function flagsToArgv(
     }
   }
   return argv;
+}
+
+/**
+ * Render `body` for cf's --body. Strings go through untouched: for an
+ * octet-stream operation (KV value, R2 object) cf uploads --body verbatim, so
+ * JSON-encoding "hello" would store the seven bytes `"hello"` — measured with
+ * `cf kv keys put --dry-run` on 2026-09-28. Everything else is JSON.
+ */
+export function bodyArg(body: unknown): string {
+  return typeof body === "string" ? body : JSON.stringify(body);
 }
 
 /** Positionals must not be mistaken for options by cf's parser. */
@@ -524,7 +534,7 @@ export function captureOutput(
 
 export const model = {
   type: "@sntxrr/cloudflare-cf",
-  version: "2026.09.28.3",
+  version: "2026.09.28.4",
   globalArguments: GlobalArgsSchema,
   resources: {
     "search": {
@@ -726,9 +736,7 @@ export const model = {
           ...checkPositionals(args.args),
           ...flagsToArgv(args.flags),
           ...(zone ? ["--zone", zone] : []),
-          ...(args.body !== undefined
-            ? ["--body", JSON.stringify(args.body)]
-            : []),
+          ...(args.body !== undefined ? ["--body", bodyArg(args.body)] : []),
           ...(mode === "dry-run" ? ["--dry-run"] : []),
         ];
 
@@ -799,6 +807,12 @@ export const model = {
       toVersion: "2026.09.28.3",
       description:
         "run fails when cf aborts an unconfirmed action instead of recording it as applied; no globalArguments change",
+      upgradeAttributes: (old: Record<string, unknown>) => old,
+    },
+    {
+      toVersion: "2026.09.28.4",
+      description:
+        "run passes a string body raw (octet-stream uploads) instead of JSON-quoting it; no globalArguments change",
       upgradeAttributes: (old: Record<string, unknown>) => old,
     },
   ],

@@ -7,6 +7,7 @@ import {
 } from "jsr:@std/assert@1.0.19";
 import { createModelTestContext } from "jsr:@swamp-club/swamp-testing@0.20260923.37";
 import {
+  bodyArg,
   captureOutput,
   cfEnv,
   flagsToArgv,
@@ -613,4 +614,48 @@ Deno.test("run applies a delete confirmed with flags.force", async () => {
   const data = getWrittenResources()[0].data as Record<string, unknown>;
   assertEquals(data.mode, "apply");
   assertEquals(data.output, { id: "rec" });
+});
+
+// ---- request bodies -------------------------------------------------------
+
+Deno.test("bodyArg passes strings raw and JSON-encodes everything else", () => {
+  // cf uploads an octet-stream --body verbatim; quoting it corrupts the value.
+  assertEquals(bodyArg("hello e2e"), "hello e2e");
+  assertEquals(bodyArg('{"title":"t"}'), '{"title":"t"}');
+  assertEquals(bodyArg({ title: "t" }), '{"title":"t"}');
+  assertEquals(bodyArg([1, 2]), "[1,2]");
+  assertEquals(bodyArg(true), "true");
+});
+
+Deno.test("run sends a string body raw for an octet-stream upload", async () => {
+  const { context: ctx } = context("run");
+  await withFakeCf(
+    (argv) =>
+      argv[0] === "schema"
+        ? {
+          stdout: JSON.stringify({
+            operationId: "kv-put",
+            httpMethod: "PUT",
+            path:
+              "/accounts/{account_id}/storage/kv/namespaces/{namespace_id}/values/{key_name}",
+            pathParams: [],
+            queryParams: [],
+            hasRequestBody: true,
+            requestBodyFields: [],
+          }),
+        }
+        : { stdout: JSON.stringify({ bodyKind: "octet-stream" }) },
+    async (calls) => {
+      await model.methods.run.execute({
+        command: "kv keys put",
+        args: ["greeting"],
+        flags: { "namespace-id": "ns" },
+        body: "hello e2e",
+        apply: false,
+        requestId: "unit",
+      }, ctx);
+      const argv = calls[1].argv;
+      assertEquals(argv[argv.indexOf("--body") + 1], "hello e2e");
+    },
+  );
 });

@@ -82,14 +82,25 @@ Writes the `operation` resource.
 
 ### `whoami`
 
-Verify the credential (`cf auth whoami`). cf reports `authenticated: true` for
-any token it *finds*, valid or not, so this method fails unless `tokenValid` is
-also true — an invalid token is a failure, never a pass. Writes the `identity`
-resource (auth source and visible accounts).
+Verify the credential. An API token is checked against Cloudflare's own
+token-verify endpoints: `/user/tokens/verify` first, then
+`/accounts/{id}/tokens/verify` when `accountId` is set, because an
+account-owned token only verifies there. The method fails unless one of them
+reports the token `active`. An invalid token is always a failure.
+
+`cf auth whoami`'s own `tokenValid` field is **not** used for API tokens. It
+only means "could read `/user` or list accounts", so a correctly scoped token
+(say, DNS edit on one zone) reports `tokenValid: false` even though it works.
+The field is used only for OAuth profiles, where no verify endpoint exists.
 
 ```bash
 swamp model method run example-account whoami
 ```
+
+It writes the `identity` resource with `tokenValid`, `tokenKind`
+(`user` / `account` / `oauth`), `tokenStatus`, `expiresOn`, the auth source and
+the accounts `cf` could list. An empty `accounts` list just means the token
+lacks Account Settings Read; it is not an auth failure.
 
 ### `run`
 
@@ -126,7 +137,9 @@ How `run` decides what to do:
    generated API operations.
 2. `GET`/`HEAD` operations execute (`mode: read`).
 3. Any other method runs with `--dry-run` (`mode: dry-run`) and stores the
-   planned request — method, URL, path params and body.
+   planned request: method, URL, path params and body. `cf` does not look up
+   a zone *name* during a dry-run, so the URL shows `/zones/example.com/…`
+   where the real call uses the zone ID.
 4. Only when the model sets `allowWrites: true` **and** the call passes
    `apply=true` does the write execute (`mode: apply`). `apply=true` without
    `allowWrites` fails before cf is invoked.

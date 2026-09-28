@@ -22,7 +22,7 @@ it, **verify** its credential, and **run** it — reads execute, writes are
 | -------- | ------------------------------------------------------------------------------------------------ |
 | `search` | `cf cli search` — find the command for a task described in plain words.                          |
 | `schema` | `cf schema` — record an operation's HTTP method, path and parameters.                            |
-| `whoami` | `cf auth whoami` — fails unless the token is actually valid.                                     |
+| `whoami` | Verifies the token with Cloudflare's token-verify endpoints and fails unless it is `active`. Scoped tokens pass. |
 | `run`    | Run an API operation. `GET` executes; other methods are `--dry-run` unless `allowWrites` + `apply`. |
 
 ## Quick start

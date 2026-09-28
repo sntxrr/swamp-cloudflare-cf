@@ -39,7 +39,7 @@ Global arguments:
 | ---------------- | ---------- | -------------------------------------------------------------------------------------------- |
 | `apiToken`       | —          | API token, passed to cf as `CLOUDFLARE_API_TOKEN` in the child env. **Store in a vault.** Omit to use cf's OAuth profile. |
 | `accountId`      | —          | Default account, passed as `CLOUDFLARE_ACCOUNT_ID`.                                          |
-| `zone`           | —          | Default zone ID or domain, passed as `--zone`.                                               |
+| `zone`           | —          | Default zone ID or domain, passed as `--zone`. A domain name is resolved through the account, so a token without Account Settings Read also needs `accountId` (or pass the zone ID). |
 | `profile`        | —          | Named cf OAuth profile (`--profile`).                                                        |
 | `cfCommand`      | `["cf"]`   | Command that launches cf.                                                                    |
 | `allowWrites`    | `false`    | Permit `run` to execute non-`GET` operations when the call also sets `apply=true`.           |
@@ -143,6 +143,17 @@ How `run` decides what to do:
 4. Only when the model sets `allowWrites: true` **and** the call passes
    `apply=true` does the write execute (`mode: apply`). `apply=true` without
    `allowWrites` fails before cf is invoked.
+5. Destructive operations such as deletes also need `flags: {"force": true}`.
+   Without a terminal and without `--force`, `cf` declines its own "Continue?"
+   prompt, prints `Aborted.` and **exits 0 having changed nothing**. `run`
+   detects this and fails, telling you to re-run with `force`. An aborted write
+   is never stored, so `cf-activity` never counts it as applied.
+
+```bash
+swamp model method run example-account run \
+  --input 'command=dns records delete' \
+  --input-file <(echo '{"args": ["<dns-record-id>"], "flags": {"force": true}, "apply": true}')
+```
 
 Flags the model owns (`dry-run`, `body`, `zone`, `profile`, `local`, `help`, …)
 cannot be set through `flags`, so a caller cannot sidestep the dry-run guard.

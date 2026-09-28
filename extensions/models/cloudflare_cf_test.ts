@@ -12,6 +12,7 @@ import {
   flagsToArgv,
   model,
   parseCommand,
+  wasAborted,
 } from "./cloudflare_cf.ts";
 
 type RunContext = Parameters<typeof model.methods.run.execute>[1];
@@ -163,6 +164,14 @@ Deno.test("captureOutput parses JSON, keeps text, and truncates oversize output"
   const big = captureOutput("x".repeat(50), 10);
   assertEquals(big.truncated, true);
   assertEquals(big.outputText, "x".repeat(10));
+});
+
+Deno.test("the upgrade chain ascends and ends at the model version", () => {
+  // swamp refuses to load the type otherwise ("upgrade chain must terminate
+  // at the current version") — the whole extension becomes unavailable.
+  const versions = model.upgrades.map((u) => u.toVersion);
+  assertEquals(versions, [...versions].sort());
+  assertEquals(versions.at(-1), model.version);
 });
 
 Deno.test("each method defaults to its own data name", () => {
@@ -519,4 +528,89 @@ Deno.test("run surfaces cf errors with the token redacted", async () => {
       assertEquals(err.message.includes(TOKEN), false);
     },
   );
+});
+
+// ---- aborted confirmations -----------------------------------------------
+
+/** cf's real stderr for an unconfirmed delete with no TTY (measured live). */
+const ABORT_STDERR =
+  "\u2502\n\u25c6 This permanently deletes the resource. Continue? (non-interactive; pass --force to confirm)\n\u2502\nAborted.\n";
+
+Deno.test("wasAborted recognizes cf's non-interactive abort only on exit 0", () => {
+  assertEquals(wasAborted({ code: 0, stderr: ABORT_STDERR }), true);
+  assertEquals(wasAborted({ code: 0, stderr: "Aborted.\n" }), true);
+  assertEquals(wasAborted({ code: 1, stderr: ABORT_STDERR }), false);
+  assertEquals(wasAborted({ code: 0, stderr: "" }), false);
+  assertEquals(
+    wasAborted({ code: 0, stderr: "Deleted record (nothing aborted here)" }),
+    false,
+  );
+});
+
+const DELETE_SCHEMA = {
+  operationId: "dns-records-for-a-zone-delete-dns-record",
+  httpMethod: "DELETE",
+  path: "/zones/{zone_id}/dns_records/{dns_record_id}",
+  pathParams: [],
+  queryParams: [],
+  hasRequestBody: false,
+  requestBodyFields: [],
+};
+
+Deno.test("run fails instead of recording an aborted delete as applied", async () => {
+  const { context: ctx, getWrittenResources } = context("run", {
+    ...GLOBAL_ARGS,
+    allowWrites: true,
+  });
+  await withFakeCf(
+    (argv) =>
+      argv[0] === "schema"
+        ? { stdout: JSON.stringify(DELETE_SCHEMA) }
+        : argv.includes("--force")
+        ? { stdout: JSON.stringify({ id: "rec" }) }
+        : { code: 0, stderr: ABORT_STDERR },
+    async () => {
+      await assertRejects(
+        () =>
+          model.methods.run.execute({
+            command: "dns records delete",
+            args: ["rec"],
+            flags: {},
+            apply: true,
+            requestId: "unit",
+          }, ctx),
+        Error,
+        'flags: {"force": true}',
+      );
+    },
+  );
+  assertEquals(getWrittenResources().length, 0);
+});
+
+Deno.test("run applies a delete confirmed with flags.force", async () => {
+  const { context: ctx, getWrittenResources } = context("run", {
+    ...GLOBAL_ARGS,
+    allowWrites: true,
+  });
+  await withFakeCf(
+    (argv) =>
+      argv[0] === "schema"
+        ? { stdout: JSON.stringify(DELETE_SCHEMA) }
+        : argv.includes("--force")
+        ? { stdout: JSON.stringify({ id: "rec" }) }
+        : { code: 0, stderr: ABORT_STDERR },
+    async (calls) => {
+      await model.methods.run.execute({
+        command: "dns records delete",
+        args: ["rec"],
+        flags: { force: true },
+        apply: true,
+        requestId: "unit",
+      }, ctx);
+      assertEquals(calls[1].argv.includes("--force"), true);
+    },
+  );
+  const data = getWrittenResources()[0].data as Record<string, unknown>;
+  assertEquals(data.mode, "apply");
+  assertEquals(data.output, { id: "rec" });
 });

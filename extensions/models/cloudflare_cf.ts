@@ -125,8 +125,19 @@ const OperationSchema = z.object({
 const IdentitySchema = z.object({
   authenticated: z.boolean(),
   authSource: z.string().nullable(),
-  tokenValid: z.boolean().nullable(),
-  accounts: z.array(z.record(z.string(), z.unknown())),
+  tokenValid: z.boolean().nullable().describe(
+    "API tokens: Cloudflare's token-verify endpoint reported the token active. OAuth: cf's own user/account lookup succeeded.",
+  ),
+  tokenKind: z.enum(["user", "account", "oauth"]).nullable().describe(
+    "Which verify endpoint accepted the token — user-owned or account-owned — or oauth for a cf login profile.",
+  ),
+  tokenStatus: z.string().nullable().describe(
+    'Status from the verify endpoint, e.g. "active"; null for OAuth.',
+  ),
+  expiresOn: z.string().nullable(),
+  accounts: z.array(z.record(z.string(), z.unknown())).describe(
+    "Accounts cf could list — empty for a token without Account Settings Read, which is not an auth failure.",
+  ),
   checkedAt: z.string(),
 });
 
@@ -368,6 +379,68 @@ async function cfJson(
   }
 }
 
+/** Result of asking Cloudflare's token-verify endpoints about an API token. */
+type TokenVerification = {
+  kind: "user" | "account" | null;
+  status: string | null;
+  expiresOn: string | null;
+  error: string | null;
+};
+
+/**
+ * Verify an API token with Cloudflare's own verify endpoints.
+ *
+ * `cf auth whoami` does not do this: its `tokenValid` only means "could read
+ * /user or list accounts", so a least-privilege token (say, DNS edit on one
+ * zone) that is perfectly valid reports `tokenValid: false`. User-owned tokens
+ * verify at /user/tokens/verify, account-owned ones at
+ * /accounts/{id}/tokens/verify — each rejects the other kind — so the account
+ * endpoint is tried when the user one fails and an accountId is configured.
+ */
+export async function verifyToken(
+  globalArgs: GlobalArgs,
+): Promise<TokenVerification> {
+  const attempts: Array<["user" | "account", string[]]> = [
+    ["user", ["user", "tokens", "verify"]],
+  ];
+  if (globalArgs.accountId) {
+    attempts.push(["account", ["accounts", "tokens", "verify"]]);
+  }
+  const errors: string[] = [];
+  for (const [kind, argv] of attempts) {
+    const out = await invokeCf(globalArgs, argv);
+    if (out.code === 0) {
+      try {
+        const raw = JSON.parse(out.stdout) as Record<string, unknown>;
+        const result = (raw.result ?? raw) as Record<string, unknown>;
+        const status = typeof result.status === "string" ? result.status : null;
+        return {
+          kind,
+          status,
+          expiresOn: typeof result.expires_on === "string"
+            ? result.expires_on
+            : null,
+          error: status === "active" ? null : `token status is ${status}`,
+        };
+      } catch {
+        errors.push(`${kind}: verify did not return JSON`);
+        continue;
+      }
+    }
+    errors.push(
+      `${kind}: ${
+        summarise(out.stderr || out.stdout, globalArgs.apiToken).slice(0, 160)
+      }`,
+    );
+  }
+  return {
+    kind: null,
+    status: null,
+    expiresOn: null,
+    error: errors.join("; "),
+  };
+}
+
 /** Look up an operation's schema; refuses commands that are not API operations. */
 async function fetchOperation(
   globalArgs: GlobalArgs,
@@ -436,7 +509,7 @@ export function captureOutput(
 
 export const model = {
   type: "@sntxrr/cloudflare-cf",
-  version: "2026.09.28.1",
+  version: "2026.09.28.2",
   globalArguments: GlobalArgsSchema,
   resources: {
     "search": {
@@ -518,7 +591,7 @@ export const model = {
     },
     whoami: {
       description:
-        "Verify the configured credential with cf auth whoami; fails when the token is invalid",
+        "Verify the configured credential: API tokens against Cloudflare's token-verify endpoints, OAuth via cf auth whoami; fails when it is not usable",
       arguments: WhoamiArgsSchema,
       execute: async (
         args: z.infer<typeof WhoamiArgsSchema>,
@@ -530,37 +603,82 @@ export const model = {
           "auth",
           "whoami",
         ]) as Record<string, unknown>;
-        const identity = {
-          authenticated: raw.authenticated === true,
-          authSource: typeof raw.authSource === "string"
-            ? raw.authSource
-            : null,
-          tokenValid: typeof raw.tokenValid === "boolean"
+        const authenticated = raw.authenticated === true;
+        const authSource = typeof raw.authSource === "string"
+          ? raw.authSource
+          : null;
+        if (!authenticated) {
+          throw new Error(
+            `cf found no credential (source=${
+              authSource ?? "none"
+            }) — set apiToken or run \`cf auth login\``,
+          );
+        }
+
+        // An API token is judged by Cloudflare's verify endpoints, not by
+        // cf's tokenValid (see verifyToken). OAuth profiles have no verify
+        // endpoint, so cf's own lookup is the best signal there.
+        const isApiToken = (authSource ?? "").includes("CLOUDFLARE_API_TOKEN");
+        let tokenValid: boolean | null;
+        let tokenKind: "user" | "account" | "oauth" | null;
+        let tokenStatus: string | null = null;
+        let expiresOn: string | null = null;
+        if (isApiToken) {
+          const v = await verifyToken(globalArgs);
+          if (v.error) {
+            throw new Error(
+              `Cloudflare rejected the API token (${v.error})${
+                globalArgs.accountId
+                  ? ""
+                  : " — an account-owned token also needs accountId set"
+              }`,
+            );
+          }
+          tokenValid = true;
+          tokenKind = v.kind;
+          tokenStatus = v.status;
+          expiresOn = v.expiresOn;
+        } else {
+          tokenValid = typeof raw.tokenValid === "boolean"
             ? raw.tokenValid
-            : null,
+            : null;
+          tokenKind = "oauth";
+          expiresOn = typeof raw.expiresAt === "string" ? raw.expiresAt : null;
+          if (tokenValid === false) {
+            throw new Error(
+              `cf OAuth credential is not usable (source=${
+                authSource ?? "none"
+              })`,
+            );
+          }
+        }
+
+        const identity = {
+          authenticated,
+          authSource,
+          tokenValid,
+          tokenKind,
+          tokenStatus,
+          expiresOn,
           accounts: Array.isArray(raw.accounts)
             ? raw.accounts as Record<string, unknown>[]
             : [],
           checkedAt: new Date().toISOString(),
         };
-        // cf reports authenticated=true for any token it *found*, valid or
-        // not — tokenValid is the field that proves the credential works.
-        if (!identity.authenticated || identity.tokenValid === false) {
-          throw new Error(
-            `cf credential is not usable (authenticated=${identity.authenticated}, tokenValid=${identity.tokenValid}, source=${
-              identity.authSource ?? "none"
-            })`,
-          );
-        }
         const handle = await context.writeResource(
           "identity",
           args.requestId,
           identity,
         );
-        logger.info("Authenticated via {source}; {count} account(s)", {
-          source: identity.authSource ?? "unknown",
-          count: identity.accounts.length,
-        });
+        logger.info(
+          "Authenticated via {source} ({kind} token, {status}); {count} account(s) visible",
+          {
+            source: identity.authSource ?? "unknown",
+            kind: identity.tokenKind ?? "unknown",
+            status: identity.tokenStatus ?? "n/a",
+            count: identity.accounts.length,
+          },
+        );
         return { dataHandles: [handle] };
       },
     },
@@ -647,4 +765,12 @@ export const model = {
     },
   },
   reports: ["@sntxrr/cf-activity"],
+  upgrades: [
+    {
+      toVersion: "2026.09.28.2",
+      description:
+        "whoami verifies API tokens with Cloudflare's verify endpoints; no globalArguments change",
+      upgradeAttributes: (old: Record<string, unknown>) => old,
+    },
+  ],
 };

@@ -214,46 +214,157 @@ Deno.test("schema records method, path and readOnly", async () => {
   assertEquals(data.command, "cf dns records create");
 });
 
-Deno.test("whoami fails when cf finds a token that is not valid", async () => {
+/** cf auth whoami output for an API token that can read neither /user nor accounts. */
+const SCOPED_WHOAMI = {
+  authenticated: true,
+  authSource: "CLOUDFLARE_API_TOKEN environment variable",
+  tokenValid: false,
+  accounts: [],
+};
+
+/** A fake cf for whoami: whoami output plus per-endpoint verify replies. */
+function whoamiCf(
+  whoami: Record<string, unknown>,
+  verify: { user?: Reply; account?: Reply },
+) {
+  return (argv: string[]): Reply => {
+    const cmd = argv.filter((a) => !a.startsWith("--")).join(" ");
+    if (cmd.endsWith("auth whoami")) return { stdout: JSON.stringify(whoami) };
+    if (cmd === "user tokens verify") {
+      return verify.user ?? { code: 1, stderr: "[1000] Invalid API Token" };
+    }
+    if (cmd === "accounts tokens verify") {
+      return verify.account ?? { code: 1, stderr: "[1000] Invalid API Token" };
+    }
+    return { code: 1, stderr: `unexpected ${cmd}` };
+  };
+}
+
+const ACTIVE = { stdout: JSON.stringify({ id: "tok", status: "active" }) };
+
+Deno.test("whoami accepts a scoped token cf mislabels tokenValid=false", async () => {
+  // Measured live 2026-09-28: a DNS-only token that /user/tokens/verify reports
+  // active came back from cf auth whoami as tokenValid:false, 0 accounts.
   const { context: ctx, getWrittenResources } = context("whoami");
+  await withFakeCf(whoamiCf(SCOPED_WHOAMI, { user: ACTIVE }), async (calls) => {
+    await model.methods.whoami.execute({ requestId: "unit" }, ctx);
+    assertEquals(calls.map((c) => c.argv.join(" ")), [
+      "auth whoami",
+      "user tokens verify",
+    ]);
+  });
+  const data = getWrittenResources()[0].data as Record<string, unknown>;
+  assertEquals(data.tokenValid, true);
+  assertEquals(data.tokenKind, "user");
+  assertEquals(data.tokenStatus, "active");
+  assertEquals((data.accounts as unknown[]).length, 0);
+});
+
+Deno.test("whoami falls back to the account endpoint for an account-owned token", async () => {
+  const { context: ctx, getWrittenResources } = context("whoami", {
+    ...GLOBAL_ARGS,
+    accountId: "acct",
+  });
   await withFakeCf(
-    () => ({
-      stdout: JSON.stringify({
-        authenticated: true,
-        authSource: "CLOUDFLARE_API_TOKEN environment variable",
-        tokenValid: false,
-        accounts: [],
-      }),
+    whoamiCf(SCOPED_WHOAMI, { account: ACTIVE }),
+    async (calls) => {
+      await model.methods.whoami.execute({ requestId: "unit" }, ctx);
+      assertEquals(calls[2].env.CLOUDFLARE_ACCOUNT_ID, "acct");
+    },
+  );
+  assertEquals(
+    (getWrittenResources()[0].data as Record<string, unknown>).tokenKind,
+    "account",
+  );
+});
+
+Deno.test("whoami fails when every verify endpoint rejects the token", async () => {
+  const { context: ctx, getWrittenResources } = context("whoami", {
+    ...GLOBAL_ARGS,
+    accountId: "acct",
+  });
+  await withFakeCf(whoamiCf(SCOPED_WHOAMI, {}), async () => {
+    const err = await assertRejects(
+      () => model.methods.whoami.execute({ requestId: "unit" }, ctx),
+      Error,
+      "rejected the API token",
+    );
+    assertStringIncludes(err.message, "user:");
+    assertStringIncludes(err.message, "account:");
+  });
+  assertEquals(getWrittenResources().length, 0);
+});
+
+Deno.test("whoami hints at accountId when only the user endpoint was tried", async () => {
+  const { context: ctx } = context("whoami");
+  await withFakeCf(whoamiCf(SCOPED_WHOAMI, {}), async (calls) => {
+    await assertRejects(
+      () => model.methods.whoami.execute({ requestId: "unit" }, ctx),
+      Error,
+      "needs accountId",
+    );
+    assertEquals(calls.length, 2);
+  });
+});
+
+Deno.test("whoami fails on a verify reply whose status is not active", async () => {
+  const { context: ctx } = context("whoami");
+  await withFakeCf(
+    whoamiCf(SCOPED_WHOAMI, {
+      user: { stdout: JSON.stringify({ id: "tok", status: "disabled" }) },
     }),
     async () => {
       await assertRejects(
         () => model.methods.whoami.execute({ requestId: "unit" }, ctx),
         Error,
-        "tokenValid=false",
+        "status is disabled",
       );
     },
   );
-  assertEquals(getWrittenResources().length, 0);
 });
 
-Deno.test("whoami records a valid identity", async () => {
-  const { context: ctx, getWrittenResources } = context("whoami");
+Deno.test("whoami trusts cf's lookup for an OAuth profile", async () => {
+  const oauth = {
+    authenticated: true,
+    authSource: "OAuth token from default profile",
+    tokenValid: true,
+    accounts: [{ id: "abc", name: "Example Co" }],
+  };
+  const { context: ctx, getWrittenResources } = context("whoami", {
+    ...GLOBAL_ARGS,
+    apiToken: undefined,
+  });
+  await withFakeCf(whoamiCf(oauth, {}), async (calls) => {
+    await model.methods.whoami.execute({ requestId: "unit" }, ctx);
+    assertEquals(calls.length, 1); // no verify endpoint for OAuth
+  });
+  assertEquals(
+    (getWrittenResources()[0].data as Record<string, unknown>).tokenKind,
+    "oauth",
+  );
+
+  const bad = context("whoami", { ...GLOBAL_ARGS, apiToken: undefined });
+  await withFakeCf(whoamiCf({ ...oauth, tokenValid: false }, {}), async () => {
+    await assertRejects(
+      () => model.methods.whoami.execute({ requestId: "unit" }, bad.context),
+      Error,
+      "OAuth credential is not usable",
+    );
+  });
+});
+
+Deno.test("whoami fails when cf finds no credential at all", async () => {
+  const { context: ctx } = context("whoami");
   await withFakeCf(
-    () => ({
-      stdout: JSON.stringify({
-        authenticated: true,
-        authSource: "CLOUDFLARE_API_TOKEN environment variable",
-        tokenValid: true,
-        accounts: [{ id: "abc", name: "Example Co" }],
-      }),
-    }),
+    whoamiCf({ authenticated: false, error: "Not logged in" }, {}),
     async () => {
-      await model.methods.whoami.execute({ requestId: "unit" }, ctx);
+      await assertRejects(
+        () => model.methods.whoami.execute({ requestId: "unit" }, ctx),
+        Error,
+        "found no credential",
+      );
     },
   );
-  const data = getWrittenResources()[0].data as Record<string, unknown>;
-  assertEquals(data.tokenValid, true);
-  assertEquals((data.accounts as unknown[]).length, 1);
 });
 
 Deno.test("run executes a GET operation and stores parsed output", async () => {

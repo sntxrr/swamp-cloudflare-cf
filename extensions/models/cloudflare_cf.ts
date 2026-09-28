@@ -379,6 +379,21 @@ async function cfJson(
   }
 }
 
+/**
+ * cf's non-interactive answer to a confirmation prompt. Destructive commands
+ * (deletes, and anything else that asks "Continue?") print this to stderr and
+ * exit **0** having done nothing when there is no TTY and no --force.
+ * Measured 2026-09-28 on `cf dns records delete`: exit 0, empty stdout,
+ * stderr "This permanently deletes the resource. Continue? (non-interactive;
+ * pass --force to confirm) Aborted." — the record was untouched.
+ */
+const ABORTED_CONFIRMATION = /pass --force to confirm|\bAborted\.?\s*$/m;
+
+/** True when cf exited 0 only because it declined an unconfirmed action. */
+export function wasAborted(out: { code: number; stderr: string }): boolean {
+  return out.code === 0 && ABORTED_CONFIRMATION.test(out.stderr);
+}
+
 /** Result of asking Cloudflare's token-verify endpoints about an API token. */
 type TokenVerification = {
   kind: "user" | "account" | null;
@@ -509,7 +524,7 @@ export function captureOutput(
 
 export const model = {
   type: "@sntxrr/cloudflare-cf",
-  version: "2026.09.28.2",
+  version: "2026.09.28.3",
   globalArguments: GlobalArgsSchema,
   resources: {
     "search": {
@@ -731,6 +746,14 @@ export const model = {
             }`,
           );
         }
+        // Exit 0 is not proof the action ran: see ABORTED_CONFIRMATION.
+        if (wasAborted(out)) {
+          throw new Error(
+            `${op.command} asked for confirmation and cf aborted it — nothing was ${
+              mode === "apply" ? "changed" : "run"
+            }. Re-run with flags: {"force": true} to confirm this ${op.httpMethod}.`,
+          );
+        }
 
         // cf prints a dry-run plan to stdout for some operations and stderr
         // for others; keep whichever carried it.
@@ -770,6 +793,12 @@ export const model = {
       toVersion: "2026.09.28.2",
       description:
         "whoami verifies API tokens with Cloudflare's verify endpoints; no globalArguments change",
+      upgradeAttributes: (old: Record<string, unknown>) => old,
+    },
+    {
+      toVersion: "2026.09.28.3",
+      description:
+        "run fails when cf aborts an unconfirmed action instead of recording it as applied; no globalArguments change",
       upgradeAttributes: (old: Record<string, unknown>) => old,
     },
   ],

@@ -582,7 +582,7 @@ export function captureOutput(
 
 export const model = {
   type: "@sntxrr/cloudflare-cf",
-  version: "2026.09.29.1",
+  version: "2026.09.29.2",
   globalArguments: GlobalArgsSchema,
   resources: {
     "search": {
@@ -861,6 +861,12 @@ export const model = {
       toVersion: "2026.09.29.1",
       description:
         "string bodies pass raw; errors keep cf's error box; cf runs in a private workDir (new optional global argument, default applied — no migration needed)",
+      upgradeAttributes: (old: Record<string, unknown>) => old,
+    },
+    {
+      toVersion: "2026.09.29.2",
+      description:
+        "cf-activity counts every retained version of each result, not just the latest; no globalArguments change",
       upgradeAttributes: (old: Record<string, unknown>) => old,
     },
   ],

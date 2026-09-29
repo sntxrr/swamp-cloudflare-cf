@@ -77,9 +77,41 @@ swamp report get @sntxrr/cf-activity --model example-account --markdown
 
 ## Testing
 
+### Unit tests
+
 ```bash
-deno test --allow-net extensions/models/ extensions/reports/
+deno test -A extensions/models/ extensions/reports/
 ```
+
+### Live end-to-end suite
+
+[`e2e/live.ts`](e2e/live.ts) drives the real `swamp` CLI against a real
+Cloudflare account. `cf` has ~2,900 operations, but they reduce to a few
+shapes the model has to handle, and the suite covers each one on a real
+resource:
+
+| Dimension | Covered |
+| --------- | ------- |
+| Method | GET, POST, PUT, PATCH, DELETE (unconfirmed → must fail; `--force` → deletes) |
+| Scope | zone, account, radar, and OAuth auth |
+| Request body | none, JSON, octet-stream (KV value, R2 object), multipart (BIND import) |
+| Response | JSON, raw text (zone export, KV/R2 values byte-exact), truncation |
+| Errors | 404, client-side validation, non-API command, model-owned flag, apply without `allowWrites` |
+| Hygiene | `cf`'s account cache never lands in the swamp repo (checked with and without `accountId`) |
+
+```bash
+npx -y cf@1.0.0-beta.5 auth login                             # once; the suite uses cf's OAuth profile
+CF_E2E_ZONE=example.com deno run -A e2e/live.ts               # reads + dry-runs only
+CF_E2E_ZONE=example.com deno run -A e2e/live.ts --apply       # + write round-trips
+```
+
+By default it only reads and dry-runs, and the model it creates has
+`allowWrites=false`, so nothing can be written. `--apply` adds create →
+update → delete round-trips on throwaway `swamp-e2e-<run>` resources (a TXT
+record, a KV namespace, a D1 database, an R2 bucket), each deleted and verified
+gone by listing at the end. A list that errors is reported `UNVERIFIED`, never
+clean. `--source published` tests the registry version instead of the local
+source; `--skip r2` skips R2 when it is not enabled on the account.
 
 See [`extensions/README.md`](extensions/README.md#testing) for an end-to-end run
 that needs no real credential.

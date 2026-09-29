@@ -56,6 +56,9 @@ const GlobalArgsSchema = z.object({
   maxOutputBytes: z.number().int().positive().default(256 * 1024).describe(
     "Largest cf stdout persisted per run; larger results are stored truncated as text.",
   ),
+  workDir: z.string().optional().describe(
+    "Directory cf runs in. cf writes an account cache (.cloudflare/cache/cloudflare-account.json: account ID and name) into its working directory, so it must not be your swamp repo. Default: $XDG_CACHE_HOME/swamp-cloudflare-cf, else ~/.cache/swamp-cloudflare-cf.",
+  ),
 });
 
 type GlobalArgs = z.infer<typeof GlobalArgsSchema>;
@@ -197,7 +200,7 @@ const RunArgsSchema = z.object({
     'Command options without dashes, e.g. {"type": "A", "per-page": 100}. true emits a bare flag, false is omitted, arrays repeat the flag.',
   ),
   body: z.unknown().optional().describe(
-    "JSON request body, sent as --body (bypasses individual body flags).",
+    "Request body, sent as --body. An object or array is JSON-encoded; a string is passed through raw — use a string for octet-stream uploads (KV values, R2 objects), or a pre-serialized JSON document.",
   ),
   zone: z.string().optional().describe(
     "Zone ID or domain for this call; overrides the model's zone.",
@@ -274,6 +277,16 @@ export function flagsToArgv(
   return argv;
 }
 
+/**
+ * Render `body` for cf's --body. Strings go through untouched: for an
+ * octet-stream operation (KV value, R2 object) cf uploads --body verbatim, so
+ * JSON-encoding "hello" would store the seven bytes `"hello"` — measured with
+ * `cf kv keys put --dry-run` on 2026-09-28. Everything else is JSON.
+ */
+export function bodyArg(body: unknown): string {
+  return typeof body === "string" ? body : JSON.stringify(body);
+}
+
 /** Positionals must not be mistaken for options by cf's parser. */
 export function checkPositionals(args: string[]): string[] {
   for (const a of args) {
@@ -304,15 +317,57 @@ function profileArgv(globalArgs: GlobalArgs): string[] {
   return globalArgs.profile ? ["--profile", globalArgs.profile] : [];
 }
 
-/** Trim a stderr blob to its informative lines for an error message. */
-function summarise(text: string, token?: string): string {
-  const cleaned = text
-    .split("\n")
+/**
+ * Trim a stderr blob to its informative lines for an error message.
+ *
+ * cf draws its errors in a box (`┌ Error` / `┌ APIError` … `└`), and for an
+ * argument error it prints the command's whole usage text *first* — 160+
+ * lines — with the box last. Keeping the head of that would cut off the
+ * reason, so when a box is present only the last one is kept.
+ */
+export function summarise(text: string, token?: string): string {
+  const lines = text.split("\n");
+  const box = lines.findLastIndex((l) => l.startsWith("┌"));
+  const cleaned = (box >= 0 ? lines.slice(box) : lines)
     .map((l) => l.replace(/^[│┌└]\s?/, "").trim())
     .filter((l) => l.length > 0)
     .join(" · ")
     .slice(0, 600);
   return token ? cleaned.split(token).join("[redacted]") : cleaned;
+}
+
+/**
+ * The directory cf runs in. cf writes `.cloudflare/cache/cloudflare-account.json`
+ * — the account ID and an account name that can contain the owner's email —
+ * into its *current working directory* (measured 2026-09-28). Inheriting
+ * swamp's cwd put that file in the swamp repo, where `git add -A` picked it up.
+ * A private per-user cache directory keeps it out of every repo.
+ */
+export function cfWorkDir(globalArgs: GlobalArgs): string {
+  if (globalArgs.workDir) return globalArgs.workDir;
+  const xdg = Deno.env.get("XDG_CACHE_HOME");
+  const home = Deno.env.get("HOME");
+  const base = xdg ||
+    (home ? `${home}/.cache` : Deno.env.get("TMPDIR") || "/tmp");
+  return `${base.replace(/\/+$/, "")}/swamp-cloudflare-cf`;
+}
+
+/**
+ * Make relative `file` flag values absolute against swamp's working
+ * directory, so moving cf into cfWorkDir does not change what they point at.
+ */
+export function resolveFileFlags<T>(
+  flags: Record<string, T>,
+  base: string,
+): Record<string, T> {
+  const out: Record<string, T> = {};
+  for (const [k, v] of Object.entries(flags)) {
+    const name = k.replace(/^-+/, "");
+    out[k] = name === "file" && typeof v === "string" && !v.startsWith("/")
+      ? `${base.replace(/\/+$/, "")}/${v}` as T
+      : v;
+  }
+  return out;
 }
 
 /** Run cf with the given argv; never throws on a non-zero exit. */
@@ -324,8 +379,11 @@ export async function invokeCf(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), globalArgs.timeoutMs);
   try {
+    const cwd = cfWorkDir(globalArgs);
+    await Deno.mkdir(cwd, { recursive: true, mode: 0o700 });
     const output = await new Deno.Command(bin, {
       args: [...prefix, ...argv],
+      cwd,
       env: cfEnv(globalArgs),
       stdin: "null",
       stdout: "piped",
@@ -524,7 +582,7 @@ export function captureOutput(
 
 export const model = {
   type: "@sntxrr/cloudflare-cf",
-  version: "2026.09.28.3",
+  version: "2026.09.29.1",
   globalArguments: GlobalArgsSchema,
   resources: {
     "search": {
@@ -724,11 +782,9 @@ export const model = {
           ...profileArgv(globalArgs),
           ...tokens,
           ...checkPositionals(args.args),
-          ...flagsToArgv(args.flags),
+          ...flagsToArgv(resolveFileFlags(args.flags, Deno.cwd())),
           ...(zone ? ["--zone", zone] : []),
-          ...(args.body !== undefined
-            ? ["--body", JSON.stringify(args.body)]
-            : []),
+          ...(args.body !== undefined ? ["--body", bodyArg(args.body)] : []),
           ...(mode === "dry-run" ? ["--dry-run"] : []),
         ];
 
@@ -799,6 +855,12 @@ export const model = {
       toVersion: "2026.09.28.3",
       description:
         "run fails when cf aborts an unconfirmed action instead of recording it as applied; no globalArguments change",
+      upgradeAttributes: (old: Record<string, unknown>) => old,
+    },
+    {
+      toVersion: "2026.09.29.1",
+      description:
+        "string bodies pass raw; errors keep cf's error box; cf runs in a private workDir (new optional global argument, default applied — no migration needed)",
       upgradeAttributes: (old: Record<string, unknown>) => old,
     },
   ],

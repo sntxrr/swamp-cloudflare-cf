@@ -7,11 +7,15 @@ import {
 } from "jsr:@std/assert@1.0.19";
 import { createModelTestContext } from "jsr:@swamp-club/swamp-testing@0.20260923.37";
 import {
+  bodyArg,
   captureOutput,
   cfEnv,
+  cfWorkDir,
   flagsToArgv,
   model,
   parseCommand,
+  resolveFileFlags,
+  summarise,
   wasAborted,
 } from "./cloudflare_cf.ts";
 
@@ -19,7 +23,11 @@ type RunContext = Parameters<typeof model.methods.run.execute>[1];
 
 const TOKEN = "cf-test-token-not-real";
 
+/** A private workDir per test run, so tests never touch ~/.cache. */
+const WORK_DIR = await Deno.makeTempDir({ prefix: "cf-unit-" });
+
 const GLOBAL_ARGS = {
+  workDir: WORK_DIR,
   apiToken: TOKEN,
   cfCommand: ["cf"],
   allowWrites: false,
@@ -28,7 +36,7 @@ const GLOBAL_ARGS = {
   maxOutputBytes: 256 * 1024,
 };
 
-type Call = { argv: string[]; env: Record<string, string> };
+type Call = { argv: string[]; env: Record<string, string>; cwd?: string };
 type Reply = { code?: number; stdout?: string; stderr?: string };
 
 /** Swap in a fake `Deno.Command` for the duration of `fn`. */
@@ -43,9 +51,13 @@ async function withFakeCf(
     #call: Call;
     constructor(
       _cmd: string,
-      opts: { args?: string[]; env?: Record<string, string> },
+      opts: { args?: string[]; env?: Record<string, string>; cwd?: string },
     ) {
-      this.#call = { argv: opts.args ?? [], env: opts.env ?? {} };
+      this.#call = {
+        argv: opts.args ?? [],
+        env: opts.env ?? {},
+        cwd: opts.cwd,
+      };
       calls.push(this.#call);
     }
     output() {
@@ -613,4 +625,145 @@ Deno.test("run applies a delete confirmed with flags.force", async () => {
   const data = getWrittenResources()[0].data as Record<string, unknown>;
   assertEquals(data.mode, "apply");
   assertEquals(data.output, { id: "rec" });
+});
+
+// ---- request bodies -------------------------------------------------------
+
+Deno.test("bodyArg passes strings raw and JSON-encodes everything else", () => {
+  // cf uploads an octet-stream --body verbatim; quoting it corrupts the value.
+  assertEquals(bodyArg("hello e2e"), "hello e2e");
+  assertEquals(bodyArg('{"title":"t"}'), '{"title":"t"}');
+  assertEquals(bodyArg({ title: "t" }), '{"title":"t"}');
+  assertEquals(bodyArg([1, 2]), "[1,2]");
+  assertEquals(bodyArg(true), "true");
+});
+
+Deno.test("run sends a string body raw for an octet-stream upload", async () => {
+  const { context: ctx } = context("run");
+  await withFakeCf(
+    (argv) =>
+      argv[0] === "schema"
+        ? {
+          stdout: JSON.stringify({
+            operationId: "kv-put",
+            httpMethod: "PUT",
+            path:
+              "/accounts/{account_id}/storage/kv/namespaces/{namespace_id}/values/{key_name}",
+            pathParams: [],
+            queryParams: [],
+            hasRequestBody: true,
+            requestBodyFields: [],
+          }),
+        }
+        : { stdout: JSON.stringify({ bodyKind: "octet-stream" }) },
+    async (calls) => {
+      await model.methods.run.execute({
+        command: "kv keys put",
+        args: ["greeting"],
+        flags: { "namespace-id": "ns" },
+        body: "hello e2e",
+        apply: false,
+        requestId: "unit",
+      }, ctx);
+      const argv = calls[1].argv;
+      assertEquals(argv[argv.indexOf("--body") + 1], "hello e2e");
+    },
+  );
+});
+
+// ---- error summaries -------------------------------------------------------
+
+Deno.test("summarise keeps cf's error box, not the usage text before it", () => {
+  // cf prints 160+ lines of usage and then the reason in a box (measured).
+  const usage = Array.from({ length: 160 }, (_, i) => `  --flag-${i}  help`)
+    .join("\n");
+  const stderr = `cf dns records list\n\n${usage}\n\u250c Error\n` +
+    `\u2502 Invalid values:\n\u2502 Argument: type, Given: "NOT-A-TYPE"\n\u2514\n`;
+  const s = summarise(stderr);
+  assertEquals(s.startsWith("Error · Invalid values:"), true, s);
+  assertStringIncludes(s, 'Given: "NOT-A-TYPE"');
+  assertEquals(s.includes("--flag-"), false);
+});
+
+Deno.test("summarise keeps the head when there is no error box", () => {
+  assertEquals(
+    summarise("Schema not found\nDid you mean:\n  cf x"),
+    "Schema not found · Did you mean: · cf x",
+  );
+});
+
+// ---- working directory -----------------------------------------------------
+
+Deno.test("cf runs in the private workDir, never swamp's cwd", async () => {
+  // cf writes .cloudflare/cache/cloudflare-account.json (account ID and name)
+  // into its cwd; inheriting swamp's cwd leaked it into a repo (2026-09-29).
+  const { context: ctx } = context("run");
+  await withFakeCf(fakeCf, async (calls) => {
+    await model.methods.run.execute({
+      command: "dns records list",
+      args: [],
+      flags: {},
+      apply: false,
+      requestId: "unit",
+    }, ctx);
+    for (const c of calls) assertEquals(c.cwd, WORK_DIR);
+    for (const c of calls) assertEquals(c.cwd === Deno.cwd(), false);
+  });
+  assertEquals((await Deno.stat(WORK_DIR)).isDirectory, true);
+});
+
+Deno.test("cfWorkDir defaults under XDG_CACHE_HOME, then ~/.cache", () => {
+  const saved = {
+    xdg: Deno.env.get("XDG_CACHE_HOME"),
+    home: Deno.env.get("HOME"),
+  };
+  try {
+    Deno.env.set("XDG_CACHE_HOME", "/x/cache/");
+    assertEquals(cfWorkDir({} as never), "/x/cache/swamp-cloudflare-cf");
+    Deno.env.delete("XDG_CACHE_HOME");
+    Deno.env.set("HOME", "/home/heron");
+    assertEquals(
+      cfWorkDir({} as never),
+      "/home/heron/.cache/swamp-cloudflare-cf",
+    );
+    assertEquals(cfWorkDir({ workDir: "/w" } as never), "/w");
+  } finally {
+    if (saved.xdg === undefined) Deno.env.delete("XDG_CACHE_HOME");
+    else Deno.env.set("XDG_CACHE_HOME", saved.xdg);
+    if (saved.home !== undefined) Deno.env.set("HOME", saved.home);
+  }
+});
+
+Deno.test("relative file flags resolve against swamp's cwd, not the workDir", () => {
+  assertEquals(
+    resolveFileFlags({ file: "zone.txt", proxied: true }, "/repo/"),
+    { file: "/repo/zone.txt", proxied: true },
+  );
+  assertEquals(resolveFileFlags({ file: "/abs/zone.txt" }, "/repo"), {
+    file: "/abs/zone.txt",
+  });
+  assertEquals(resolveFileFlags({ "--file": "z" }, "/repo"), {
+    "--file": "/repo/z",
+  });
+});
+
+Deno.test("run passes an absolute file path to cf", async () => {
+  const { context: ctx } = context("run");
+  await withFakeCf(
+    (argv) =>
+      argv[0] === "schema"
+        ? { stdout: JSON.stringify(SCHEMAS["dns records create"]) }
+        : { stdout: "{}" },
+    async (calls) => {
+      await model.methods.run.execute({
+        command: "dns records create",
+        args: [],
+        flags: { file: "zone.txt" },
+        apply: false,
+        requestId: "unit",
+      }, ctx);
+      const argv = calls[1].argv;
+      assertEquals(argv[argv.indexOf("--file") + 1], `${Deno.cwd()}/zone.txt`);
+    },
+  );
 });

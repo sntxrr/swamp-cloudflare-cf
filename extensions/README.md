@@ -46,6 +46,7 @@ Global arguments:
 | `telemetry`      | `false`    | Allow cf's anonymous usage telemetry (`CF_SEND_TELEMETRY`).                                  |
 | `timeoutMs`      | `120000`   | Kill a cf invocation that runs longer than this.                                             |
 | `maxOutputBytes` | `262144`   | Largest stdout persisted per run; larger results are stored truncated as text.               |
+| `workDir`        | `~/.cache/swamp-cloudflare-cf` | Directory `cf` runs in (`$XDG_CACHE_HOME/swamp-cloudflare-cf` when set). `cf` writes an account cache — account ID and an account name that can contain the owner's email — into its working directory, so it must never be a repo. Relative `flags.file` paths still resolve against swamp's directory. |
 
 The token only ever travels in the child process environment — it is never on
 the cf command line, never in stored `argv`, and redacted from error messages.
@@ -125,7 +126,7 @@ Inputs:
 | `command`   | Command path without the leading `cf`, e.g. `dns records get`.                            |
 | `args`      | Positional arguments, e.g. `["<dns-record-id>"]`. Values starting with `-` are refused.   |
 | `flags`     | Options without dashes: `{"per-page": 100, "proxied": true}`. `true` = bare flag, `false` = omitted, arrays repeat. |
-| `body`      | JSON request body, sent as `--body`.                                                      |
+| `body`      | Request body, sent as `--body`. An object is JSON-encoded; a **string is sent raw**, which is what octet-stream uploads (KV values, R2 objects) need. Use `flags: {"file": "/abs/path"}` for multipart uploads such as `dns records import`. |
 | `zone`      | Zone for this call; overrides the model's `zone`.                                         |
 | `apply`     | Execute a non-`GET` operation for real (also needs the model's `allowWrites`).            |
 | `requestId` | Stored data name (default `result`; `latest` is reserved by swamp).                       |
@@ -187,7 +188,7 @@ Labels: `cloudflare`, `audit`, `cf`. Skip it with
 Unit tests (a fake `Deno.Command` — no cf binary, no network, no token):
 
 ```bash
-deno test --allow-net extensions/models/ extensions/reports/
+deno test -A extensions/models/ extensions/reports/
 ```
 
 End-to-end without a real credential: `search`, `schema` and a dry-run `run`

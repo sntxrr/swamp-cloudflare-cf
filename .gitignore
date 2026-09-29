@@ -17,3 +17,6 @@
 /models/
 vaults/
 .review/
+
+# cf CLI cache (account id/name) written into the working directory — never commit
+.cloudflare/

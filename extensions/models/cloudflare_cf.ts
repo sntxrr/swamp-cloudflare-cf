@@ -314,10 +314,18 @@ function profileArgv(globalArgs: GlobalArgs): string[] {
   return globalArgs.profile ? ["--profile", globalArgs.profile] : [];
 }
 
-/** Trim a stderr blob to its informative lines for an error message. */
-function summarise(text: string, token?: string): string {
-  const cleaned = text
-    .split("\n")
+/**
+ * Trim a stderr blob to its informative lines for an error message.
+ *
+ * cf draws its errors in a box (`┌ Error` / `┌ APIError` … `└`), and for an
+ * argument error it prints the command's whole usage text *first* — 160+
+ * lines — with the box last. Keeping the head of that would cut off the
+ * reason, so when a box is present only the last one is kept.
+ */
+export function summarise(text: string, token?: string): string {
+  const lines = text.split("\n");
+  const box = lines.findLastIndex((l) => l.startsWith("┌"));
+  const cleaned = (box >= 0 ? lines.slice(box) : lines)
     .map((l) => l.replace(/^[│┌└]\s?/, "").trim())
     .filter((l) => l.length > 0)
     .join(" · ")
@@ -534,7 +542,7 @@ export function captureOutput(
 
 export const model = {
   type: "@sntxrr/cloudflare-cf",
-  version: "2026.09.28.4",
+  version: "2026.09.29.1",
   globalArguments: GlobalArgsSchema,
   resources: {
     "search": {
@@ -810,9 +818,9 @@ export const model = {
       upgradeAttributes: (old: Record<string, unknown>) => old,
     },
     {
-      toVersion: "2026.09.28.4",
+      toVersion: "2026.09.29.1",
       description:
-        "run passes a string body raw (octet-stream uploads) instead of JSON-quoting it; no globalArguments change",
+        "string bodies pass raw; errors keep cf's error box instead of the usage text; no globalArguments change",
       upgradeAttributes: (old: Record<string, unknown>) => old,
     },
   ],

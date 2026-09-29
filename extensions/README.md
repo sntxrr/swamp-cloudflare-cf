@@ -125,7 +125,7 @@ Inputs:
 | `command`   | Command path without the leading `cf`, e.g. `dns records get`.                            |
 | `args`      | Positional arguments, e.g. `["<dns-record-id>"]`. Values starting with `-` are refused.   |
 | `flags`     | Options without dashes: `{"per-page": 100, "proxied": true}`. `true` = bare flag, `false` = omitted, arrays repeat. |
-| `body`      | JSON request body, sent as `--body`.                                                      |
+| `body`      | Request body, sent as `--body`. An object is JSON-encoded; a **string is sent raw**, which is what octet-stream uploads (KV values, R2 objects) need. Use `flags: {"file": "/abs/path"}` for multipart uploads such as `dns records import`. |
 | `zone`      | Zone for this call; overrides the model's `zone`.                                         |
 | `apply`     | Execute a non-`GET` operation for real (also needs the model's `allowWrites`).            |
 | `requestId` | Stored data name (default `result`; `latest` is reserved by swamp).                       |

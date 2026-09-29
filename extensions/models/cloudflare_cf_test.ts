@@ -13,6 +13,7 @@ import {
   flagsToArgv,
   model,
   parseCommand,
+  summarise,
   wasAborted,
 } from "./cloudflare_cf.ts";
 
@@ -657,5 +658,26 @@ Deno.test("run sends a string body raw for an octet-stream upload", async () => 
       const argv = calls[1].argv;
       assertEquals(argv[argv.indexOf("--body") + 1], "hello e2e");
     },
+  );
+});
+
+// ---- error summaries -------------------------------------------------------
+
+Deno.test("summarise keeps cf's error box, not the usage text before it", () => {
+  // cf prints 160+ lines of usage and then the reason in a box (measured).
+  const usage = Array.from({ length: 160 }, (_, i) => `  --flag-${i}  help`)
+    .join("\n");
+  const stderr = `cf dns records list\n\n${usage}\n\u250c Error\n` +
+    `\u2502 Invalid values:\n\u2502 Argument: type, Given: "NOT-A-TYPE"\n\u2514\n`;
+  const s = summarise(stderr);
+  assertEquals(s.startsWith("Error · Invalid values:"), true, s);
+  assertStringIncludes(s, 'Given: "NOT-A-TYPE"');
+  assertEquals(s.includes("--flag-"), false);
+});
+
+Deno.test("summarise keeps the head when there is no error box", () => {
+  assertEquals(
+    summarise("Schema not found\nDid you mean:\n  cf x"),
+    "Schema not found · Did you mean: · cf x",
   );
 });

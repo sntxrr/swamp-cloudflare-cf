@@ -22,6 +22,7 @@
  *   --source local|published   extension under test (default: local source)
  *   --only a,b                 run only these groups
  *   --skip a,b                 skip these groups (e.g. r2 when R2 is not enabled)
+ *   --skip-case "name,..."     skip individual cases by name
  *   --account-id <id>          required when the credential sees several accounts
  *   --keep-repo                keep the temporary swamp repo for inspection
  *
@@ -43,6 +44,7 @@ const APPLY = flag("--apply");
 const SOURCE = opt("--source") ?? "local";
 const ONLY = list(opt("--only"));
 const SKIP = list(opt("--skip"));
+const SKIP_CASE = list(opt("--skip-case"));
 const KEEP = flag("--keep-repo");
 const ZONE = Deno.env.get("CF_E2E_ZONE") ?? "";
 if (!ZONE) {
@@ -94,7 +96,9 @@ async function check(
   fn: () => Promise<string | void>,
   opts: { needsApply?: boolean } = {},
 ) {
-  if (!wanted(group)) return record(group, shape, name, "SKIP", "filtered");
+  if (!wanted(group) || SKIP_CASE.has(name)) {
+    return record(group, shape, name, "SKIP", "filtered");
+  }
   if (opts.needsApply && !APPLY) {
     return record(group, shape, name, "SKIP", "needs --apply");
   }
@@ -134,17 +138,29 @@ async function sh(
   };
 }
 
-/** Last JSON object in swamp's --json output that carries `key`. */
+/**
+ * Last top-level JSON object in swamp's --json output that carries `key`.
+ * swamp may print several documents; braces inside strings (e.g. a truncated
+ * `outputText`) must not count, so the scan tracks string state.
+ */
 function lastJsonWith(text: string, key: string): Record<string, unknown> {
   const objs: Record<string, unknown>[] = [];
-  let depth = 0, start = -1;
+  let depth = 0, start = -1, inStr = false, esc = false;
   for (let i = 0; i < text.length; i++) {
-    if (text[i] === "{") {
+    const c = text[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (c === "\\") esc = true;
+      else if (c === '"') inStr = false;
+      continue;
+    }
+    if (c === '"') inStr = true;
+    else if (c === "{") {
       if (depth === 0) start = i;
       depth++;
-    } else if (text[i] === "}") {
+    } else if (c === "}" && depth > 0) {
       depth--;
-      if (depth === 0 && start >= 0) {
+      if (depth === 0) {
         try {
           objs.push(JSON.parse(text.slice(start, i + 1)));
         } catch { /* not JSON */ }
@@ -283,7 +299,8 @@ async function runCleanup() {
 
 async function setup(): Promise<{ accountId: string }> {
   REPO = await Deno.makeTempDir({ prefix: "swamp-cf-e2e-" });
-  const init = await swamp(["repo", "init"]);
+  // `repo init` initializes its working directory and takes no --repo-dir.
+  const init = await sh("swamp", ["repo", "init", "--json"]);
   assert(init.code === 0, `swamp repo init failed: ${init.stderr}`);
   if (SOURCE === "local") {
     await Deno.writeTextFile(

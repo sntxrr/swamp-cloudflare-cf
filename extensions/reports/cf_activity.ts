@@ -54,32 +54,37 @@ async function loadResults(context: ModelReportContext): Promise<Result[]> {
   const { modelType, modelId, dataRepository } = context;
   const all = await dataRepository.findAllForModel(modelType, modelId);
 
-  // Each run writes a new version; count each (name, version) once.
-  const seen = new Set<string>();
-  const results: Result[] = [];
+  // findAllForModel lists only the latest version of each data name, but
+  // every run writes a new version. Walk each name down from its latest
+  // version until the older versions have been garbage-collected. Skip report
+  // artifacts.
+  const latest = new Map<string, number>();
   for (const d of all) {
     if (d.name.startsWith("report-")) continue;
-    const key = `${d.name}@${d.version ?? 0}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
+    latest.set(d.name, Math.max(latest.get(d.name) ?? 0, d.version ?? 1));
+  }
 
-    const bytes = await dataRepository.getContent(
-      modelType,
-      modelId,
-      d.name,
-      d.version,
-    );
-    if (!bytes) continue;
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(new TextDecoder().decode(bytes));
-    } catch {
-      continue;
+  const results: Result[] = [];
+  for (const [name, top] of latest) {
+    for (let version = top; version >= 1; version--) {
+      const bytes = await dataRepository.getContent(
+        modelType,
+        modelId,
+        name,
+        version,
+      );
+      if (!bytes) break; // older versions were garbage-collected
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(new TextDecoder().decode(bytes));
+      } catch {
+        continue;
+      }
+      // Only `result` records carry `mode` + `ranAt`; the others fail this
+      // parse and are skipped.
+      const r = ResultSchema.safeParse(parsed);
+      if (r.success) results.push(r.data);
     }
-    // Only `result` records carry `mode` + `ranAt`; the others fail this
-    // parse and are skipped.
-    const r = ResultSchema.safeParse(parsed);
-    if (r.success) results.push(r.data);
   }
   return results.sort((a, b) => a.ranAt.localeCompare(b.ranAt));
 }

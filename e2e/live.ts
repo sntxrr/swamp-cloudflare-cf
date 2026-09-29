@@ -369,6 +369,24 @@ async function suite() {
     return `oauth, ${(id.accounts as unknown[]).length} account(s)`;
   });
 
+  // -- hygiene: cf writes .cloudflare/cache/cloudflare-account.json (account
+  // ID and name) into its cwd whenever it has to look the account up itself,
+  // i.e. when no accountId is set. That is the configuration that leaked it
+  // into a repo, so test exactly that: the model must run cf elsewhere.
+  await check(
+    "hygiene",
+    "cwd",
+    "no accountId: cf cache stays out of the repo",
+    async () => {
+      await run("probe", { command: "kv namespaces list" });
+      const leaked = await Deno.stat(`${REPO}/.cloudflare`).then(
+        () => true,
+        () => false,
+      );
+      assert(!leaked, `${REPO}/.cloudflare was created`);
+    },
+  );
+
   // -- discovery
   await check(
     "discovery",
@@ -691,10 +709,15 @@ async function dnsImport() {
   await check(
     "dns-write",
     "POST multipart",
-    "import a BIND zone file",
+    "import a BIND zone file (relative path)",
     async () => {
-      const zoneFile = `${REPO}/.e2e-import.txt`;
-      await Deno.writeTextFile(zoneFile, `${name}. 60 IN TXT "imported"\n`);
+      // Relative on purpose: cf runs in the model's workDir, so the model
+      // must resolve it against swamp's cwd (the repo) to find the file.
+      const zoneFile = "e2e-import.txt";
+      await Deno.writeTextFile(
+        `${REPO}/${zoneFile}`,
+        `${name}. 60 IN TXT "imported"\n`,
+      );
       cleanups.push({
         label: `dns ${name}`,
         gone: async () => (await dnsByName(name)).length === 0,
@@ -931,7 +954,22 @@ try {
     console.log("\nstopped at the first failure; running cleanup");
   }
 } finally {
-  if (REPO) await runCleanup();
+  if (REPO) {
+    await runCleanup();
+    // cf writes .cloudflare/cache/cloudflare-account.json (account ID and
+    // name) into its cwd; the model must keep it out of the swamp repo.
+    const leaked = await Deno.stat(`${REPO}/.cloudflare`).then(
+      () => true,
+      () => false,
+    );
+    record(
+      "hygiene",
+      "cwd",
+      "cf cache stays out of the swamp repo",
+      leaked ? "FAIL" : "PASS",
+      leaked ? `${REPO}/.cloudflare exists` : "no .cloudflare/ in repo",
+    );
+  }
   const count = (s: Status) => results.filter((r) => r.status === s).length;
   console.log(
     `\n${count("PASS")} passed · ${count("FAIL")} failed · ${

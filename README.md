@@ -80,7 +80,7 @@ swamp report get @sntxrr/cf-activity --model example-account --markdown
 ### Unit tests
 
 ```bash
-deno test --allow-net extensions/models/ extensions/reports/
+deno test -A extensions/models/ extensions/reports/
 ```
 
 ### Live end-to-end suite
@@ -97,6 +97,7 @@ resource:
 | Request body | none, JSON, octet-stream (KV value, R2 object), multipart (BIND import) |
 | Response | JSON, raw text (zone export, KV/R2 values byte-exact), truncation |
 | Errors | 404, client-side validation, non-API command, model-owned flag, apply without `allowWrites` |
+| Hygiene | `cf`'s account cache never lands in the swamp repo (checked with and without `accountId`) |
 
 ```bash
 npx -y cf@1.0.0-beta.5 auth login                             # once; the suite uses cf's OAuth profile

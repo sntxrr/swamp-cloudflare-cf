@@ -56,6 +56,9 @@ const GlobalArgsSchema = z.object({
   maxOutputBytes: z.number().int().positive().default(256 * 1024).describe(
     "Largest cf stdout persisted per run; larger results are stored truncated as text.",
   ),
+  workDir: z.string().optional().describe(
+    "Directory cf runs in. cf writes an account cache (.cloudflare/cache/cloudflare-account.json: account ID and name) into its working directory, so it must not be your swamp repo. Default: $XDG_CACHE_HOME/swamp-cloudflare-cf, else ~/.cache/swamp-cloudflare-cf.",
+  ),
 });
 
 type GlobalArgs = z.infer<typeof GlobalArgsSchema>;
@@ -333,6 +336,40 @@ export function summarise(text: string, token?: string): string {
   return token ? cleaned.split(token).join("[redacted]") : cleaned;
 }
 
+/**
+ * The directory cf runs in. cf writes `.cloudflare/cache/cloudflare-account.json`
+ * — the account ID and an account name that can contain the owner's email —
+ * into its *current working directory* (measured 2026-09-28). Inheriting
+ * swamp's cwd put that file in the swamp repo, where `git add -A` picked it up.
+ * A private per-user cache directory keeps it out of every repo.
+ */
+export function cfWorkDir(globalArgs: GlobalArgs): string {
+  if (globalArgs.workDir) return globalArgs.workDir;
+  const xdg = Deno.env.get("XDG_CACHE_HOME");
+  const home = Deno.env.get("HOME");
+  const base = xdg ||
+    (home ? `${home}/.cache` : Deno.env.get("TMPDIR") || "/tmp");
+  return `${base.replace(/\/+$/, "")}/swamp-cloudflare-cf`;
+}
+
+/**
+ * Make relative `file` flag values absolute against swamp's working
+ * directory, so moving cf into cfWorkDir does not change what they point at.
+ */
+export function resolveFileFlags<T>(
+  flags: Record<string, T>,
+  base: string,
+): Record<string, T> {
+  const out: Record<string, T> = {};
+  for (const [k, v] of Object.entries(flags)) {
+    const name = k.replace(/^-+/, "");
+    out[k] = name === "file" && typeof v === "string" && !v.startsWith("/")
+      ? `${base.replace(/\/+$/, "")}/${v}` as T
+      : v;
+  }
+  return out;
+}
+
 /** Run cf with the given argv; never throws on a non-zero exit. */
 export async function invokeCf(
   globalArgs: GlobalArgs,
@@ -342,8 +379,11 @@ export async function invokeCf(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), globalArgs.timeoutMs);
   try {
+    const cwd = cfWorkDir(globalArgs);
+    await Deno.mkdir(cwd, { recursive: true, mode: 0o700 });
     const output = await new Deno.Command(bin, {
       args: [...prefix, ...argv],
+      cwd,
       env: cfEnv(globalArgs),
       stdin: "null",
       stdout: "piped",
@@ -742,7 +782,7 @@ export const model = {
           ...profileArgv(globalArgs),
           ...tokens,
           ...checkPositionals(args.args),
-          ...flagsToArgv(args.flags),
+          ...flagsToArgv(resolveFileFlags(args.flags, Deno.cwd())),
           ...(zone ? ["--zone", zone] : []),
           ...(args.body !== undefined ? ["--body", bodyArg(args.body)] : []),
           ...(mode === "dry-run" ? ["--dry-run"] : []),
@@ -820,7 +860,7 @@ export const model = {
     {
       toVersion: "2026.09.29.1",
       description:
-        "string bodies pass raw; errors keep cf's error box instead of the usage text; no globalArguments change",
+        "string bodies pass raw; errors keep cf's error box; cf runs in a private workDir (new optional global argument, default applied — no migration needed)",
       upgradeAttributes: (old: Record<string, unknown>) => old,
     },
   ],

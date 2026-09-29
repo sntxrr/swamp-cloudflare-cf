@@ -46,6 +46,7 @@ Global arguments:
 | `telemetry`      | `false`    | Allow cf's anonymous usage telemetry (`CF_SEND_TELEMETRY`).                                  |
 | `timeoutMs`      | `120000`   | Kill a cf invocation that runs longer than this.                                             |
 | `maxOutputBytes` | `262144`   | Largest stdout persisted per run; larger results are stored truncated as text.               |
+| `workDir`        | `~/.cache/swamp-cloudflare-cf` | Directory `cf` runs in (`$XDG_CACHE_HOME/swamp-cloudflare-cf` when set). `cf` writes an account cache — account ID and an account name that can contain the owner's email — into its working directory, so it must never be a repo. Relative `flags.file` paths still resolve against swamp's directory. |
 
 The token only ever travels in the child process environment — it is never on
 the cf command line, never in stored `argv`, and redacted from error messages.
@@ -187,7 +188,7 @@ Labels: `cloudflare`, `audit`, `cf`. Skip it with
 Unit tests (a fake `Deno.Command` — no cf binary, no network, no token):
 
 ```bash
-deno test --allow-net extensions/models/ extensions/reports/
+deno test -A extensions/models/ extensions/reports/
 ```
 
 End-to-end without a real credential: `search`, `schema` and a dry-run `run`

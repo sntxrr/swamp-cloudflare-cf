@@ -1,8 +1,9 @@
 manifestVersion: 1
 
 name: "@sntxrr/cloudflare-cf"
-version: "2026.09.29.2"
+version: "2026.10.14.1"
 description: "Drive Cloudflare's agent-first cf CLI from swamp — intent search, per-command API schemas, credential checks, and any of its 3,000+ API operations with writes dry-run by default, plus a cf activity report"
+license: MIT
 repository: "https://github.com/sntxrr/swamp-cloudflare-cf"
 
 models:

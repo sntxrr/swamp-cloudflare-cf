@@ -134,6 +134,7 @@ const IdentitySchema = z.object({
   tokenKind: z.enum(["user", "account", "oauth"]).nullable().describe(
     "Which verify endpoint accepted the token — user-owned or account-owned — or oauth for a cf login profile.",
   ),
+  // swamp-quality-ignore credentials-sensitive-field: the verify endpoint status string, e.g. active; not a credential
   tokenStatus: z.string().nullable().describe(
     'Status from the verify endpoint, e.g. "active"; null for OAuth.',
   ),
@@ -381,6 +382,7 @@ export async function invokeCf(
   try {
     const cwd = cfWorkDir(globalArgs);
     await Deno.mkdir(cwd, { recursive: true, mode: 0o700 });
+    // swamp-quality-ignore deno-command: cf is the wrapped CLI; the API token goes in the CLOUDFLARE_API_TOKEN env (cfEnv), never argv, and a test asserts argv excludes it
     const output = await new Deno.Command(bin, {
       args: [...prefix, ...argv],
       cwd,
